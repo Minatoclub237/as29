@@ -1,0 +1,188 @@
+import { useEffect, useRef, useState, type RefObject } from 'react';
+
+const VIDEO_URL = '/media/aether-drone.mp4';
+
+const MAX_FRAMES = 120;
+const MIN_FRAMES = 30;
+const MAX_WIDTH = 1280;
+
+interface DroneVideoProps {
+  /** The AETHER section this video scrubs across (sticky viewport pattern). */
+  sectionRef: RefObject<HTMLElement | null>;
+}
+
+export default function DroneVideo({ sectionRef }: DroneVideoProps) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const framesRef = useRef<ImageBitmap[]>([]);
+  const [framesReady, setFramesReady] = useState(false);
+
+  // Frame extraction — runs once. On failure the <video> fallback stays visible permanently.
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    const extracted: ImageBitmap[] = [];
+
+    async function extract() {
+      try {
+        const res = await fetch(VIDEO_URL);
+        const blob = await res.blob();
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+
+        const video = document.createElement('video');
+        video.src = objectUrl;
+        video.muted = true;
+        video.playsInline = true;
+        video.preload = 'auto';
+        await new Promise<void>((resolve, reject) => {
+          video.onloadedmetadata = () => resolve();
+          video.onerror = () => reject(new Error('video load failed'));
+        });
+        if (cancelled) return;
+
+        const frameCount = Math.min(
+          MAX_FRAMES,
+          Math.max(MIN_FRAMES, Math.round(video.duration * 24))
+        );
+        const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
+        const w = Math.round(video.videoWidth * scale);
+        const h = Math.round(video.videoHeight * scale);
+
+        for (let i = 0; i < frameCount; i++) {
+          if (cancelled) return;
+          const t = (i / (frameCount - 1)) * Math.max(0, video.duration - 0.05);
+          await new Promise<void>((resolve, reject) => {
+            const onSeeked = () => {
+              video.removeEventListener('seeked', onSeeked);
+              resolve();
+            };
+            video.addEventListener('seeked', onSeeked);
+            video.onerror = () => reject(new Error('seek failed'));
+            video.currentTime = t;
+          });
+          if (cancelled) return;
+          const bitmap = await createImageBitmap(video, {
+            resizeWidth: w,
+            resizeHeight: h,
+          });
+          extracted.push(bitmap);
+        }
+        if (cancelled) return;
+
+        framesRef.current = extracted;
+        setFramesReady(true);
+      } catch {
+        // Extraction failed — do nothing, the video fallback stays visible.
+      }
+    }
+
+    extract();
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      extracted.forEach((b) => b.close());
+    };
+  }, []);
+
+  // rAF scroll-sync loop — progress measured against the AETHER section itself,
+  // so this chapter owns its own scrub territory.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    let target = 0;
+    let smoothed = 0;
+    let rafId = 0;
+    let seeking = false;
+
+    const onScroll = () => {
+      const section = sectionRef.current;
+      if (!section) return;
+      const rect = section.getBoundingClientRect();
+      const max = rect.height - window.innerHeight;
+      target = max > 0 ? Math.min(1, Math.max(0, -rect.top / max)) : 0;
+    };
+
+    const onResize = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = canvas.clientWidth * dpr;
+      canvas.height = canvas.clientHeight * dpr;
+      onScroll();
+    };
+
+    const tick = () => {
+      smoothed += (target - smoothed) * 0.08;
+      const frames = framesRef.current;
+
+      if (frames.length > 1) {
+        const idx = Math.min(
+          frames.length - 1,
+          Math.round(smoothed * (frames.length - 1))
+        );
+        const frame = frames[idx];
+        const scale = Math.max(
+          canvas.width / frame.width,
+          canvas.height / frame.height
+        );
+        const dw = frame.width * scale;
+        const dh = frame.height * scale;
+        ctx.drawImage(
+          frame,
+          (canvas.width - dw) / 2,
+          (canvas.height - dh) / 2,
+          dw,
+          dh
+        );
+      } else {
+        const video = videoRef.current;
+        if (video && video.duration && !seeking) {
+          seeking = true;
+          const onSeeked = () => {
+            video.removeEventListener('seeked', onSeeked);
+            seeking = false;
+          };
+          video.addEventListener('seeked', onSeeked);
+          video.currentTime = smoothed * video.duration;
+        }
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+
+    onScroll();
+    onResize();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onResize);
+    rafId = requestAnimationFrame(tick);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onResize);
+    };
+  }, [framesReady, sectionRef]);
+
+  return (
+    <div className="absolute inset-0 bg-[#0a0a0a]">
+      {!framesReady && (
+        <video
+          ref={videoRef}
+          src={VIDEO_URL}
+          muted
+          playsInline
+          preload="auto"
+          className="absolute inset-0 h-full w-full object-cover"
+        />
+      )}
+      <canvas
+        ref={canvasRef}
+        className={`absolute inset-0 h-full w-full ${
+          framesReady ? '' : 'invisible'
+        }`}
+      />
+    </div>
+  );
+}
