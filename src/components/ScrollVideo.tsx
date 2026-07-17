@@ -97,7 +97,15 @@ export default function ScrollVideo({ scrollLengthVh }: ScrollVideoProps) {
     let target = 0;
     let smoothed = 0;
     let rafId = 0;
-    let seeking = false;
+
+    // Mobile browsers refuse to paint a never-played video: autoplay the
+    // muted fallback; if blocked (iOS low-power), force a first-frame decode.
+    const video = videoRef.current;
+    if (video) {
+      video.play().catch(() => {
+        video.currentTime = 0.01;
+      });
+    }
 
     const onScroll = () => {
       const max = scrollLengthVh
@@ -136,18 +144,8 @@ export default function ScrollVideo({ scrollLengthVh }: ScrollVideoProps) {
           dw,
           dh
         );
-      } else {
-        const video = videoRef.current;
-        if (video && video.duration && !seeking) {
-          seeking = true;
-          const onSeeked = () => {
-            video.removeEventListener('seeked', onSeeked);
-            seeking = false;
-          };
-          video.addEventListener('seeked', onSeeked);
-          video.currentTime = smoothed * video.duration;
-        }
       }
+      // No frames yet: the autoplaying <video> fallback is on screen.
       rafId = requestAnimationFrame(tick);
     };
 
@@ -170,6 +168,8 @@ export default function ScrollVideo({ scrollLengthVh }: ScrollVideoProps) {
         <video
           ref={videoRef}
           src={VIDEO_URL}
+          autoPlay
+          loop
           muted
           playsInline
           preload="auto"
