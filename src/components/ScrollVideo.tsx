@@ -41,13 +41,34 @@ export default function ScrollVideo({ scrollLengthVh }: ScrollVideoProps) {
         });
         if (cancelled) return;
 
+        // iOS needs the decode pipeline unlocked before frames can be drawn.
+        try {
+          await video.play();
+          video.pause();
+        } catch {
+          /* autoplay refused — seeks below still decode */
+        }
+        if (cancelled) return;
+
+        // Lighter budget on mobile: fewer, smaller frames (memory).
+        const mobile = window.innerWidth < 768;
+        const maxWidth = mobile ? 720 : MAX_WIDTH;
         const frameCount = Math.min(
-          MAX_FRAMES,
+          mobile ? 64 : MAX_FRAMES,
           Math.max(MIN_FRAMES, Math.round(video.duration * 24))
         );
-        const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
+        const scale = Math.min(1, maxWidth / video.videoWidth);
         const w = Math.round(video.videoWidth * scale);
         const h = Math.round(video.videoHeight * scale);
+
+        // Route frames through a 2D canvas: createImageBitmap(video) is not
+        // supported on iOS Safari, but drawImage + createImageBitmap(canvas)
+        // works everywhere.
+        const grab = document.createElement('canvas');
+        grab.width = w;
+        grab.height = h;
+        const gctx = grab.getContext('2d');
+        if (!gctx) throw new Error('no 2d context');
 
         for (let i = 0; i < frameCount; i++) {
           if (cancelled) return;
@@ -62,10 +83,8 @@ export default function ScrollVideo({ scrollLengthVh }: ScrollVideoProps) {
             video.currentTime = t;
           });
           if (cancelled) return;
-          const bitmap = await createImageBitmap(video, {
-            resizeWidth: w,
-            resizeHeight: h,
-          });
+          gctx.drawImage(video, 0, 0, w, h);
+          const bitmap = await createImageBitmap(grab);
           extracted.push(bitmap);
         }
         if (cancelled) return;
