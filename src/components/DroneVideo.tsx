@@ -2,9 +2,9 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
 
 const VIDEO_URL = '/media/aether-drone.mp4';
 
-const MAX_FRAMES = 120;
-const MIN_FRAMES = 30;
-const MAX_WIDTH = 1280;
+const FRAME_COUNT = 80;
+const frameUrl = (i: number) =>
+  `/media/frames/drone/frame-${String(i).padStart(3, '0')}.webp`;
 
 interface DroneVideoProps {
   /** The AETHER section this video scrubs across (sticky viewport pattern). */
@@ -17,91 +17,43 @@ export default function DroneVideo({ sectionRef }: DroneVideoProps) {
   const framesRef = useRef<ImageBitmap[]>([]);
   const [framesReady, setFramesReady] = useState(false);
 
-  // Frame extraction — runs once. On failure the <video> fallback stays visible permanently.
+  // Frame loading — pre-generated WebP frames, no runtime video decoding.
+  // On failure the <video> fallback stays visible permanently.
   useEffect(() => {
     let cancelled = false;
-    let objectUrl: string | null = null;
-    const extracted: ImageBitmap[] = [];
+    const loaded: ImageBitmap[] = [];
 
-    async function extract() {
+    async function load() {
       try {
-        const res = await fetch(VIDEO_URL);
-        const blob = await res.blob();
-        if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
+        // Mobile loads every other frame: half the payload, still smooth.
+        const step = window.innerWidth < 768 ? 2 : 1;
+        const indices: number[] = [];
+        for (let i = 0; i < FRAME_COUNT; i += step) indices.push(i);
 
-        const video = document.createElement('video');
-        video.src = objectUrl;
-        video.muted = true;
-        video.playsInline = true;
-        video.preload = 'auto';
-        await new Promise<void>((resolve, reject) => {
-          video.onloadedmetadata = () => resolve();
-          video.onerror = () => reject(new Error('video load failed'));
-        });
-        if (cancelled) return;
-
-        // iOS needs the decode pipeline unlocked before frames can be drawn.
-        try {
-          await video.play();
-          video.pause();
-        } catch {
-          /* autoplay refused — seeks below still decode */
-        }
-        if (cancelled) return;
-
-        // Lighter budget on mobile: fewer, smaller frames (memory).
-        const mobile = window.innerWidth < 768;
-        const maxWidth = mobile ? 720 : MAX_WIDTH;
-        const frameCount = Math.min(
-          mobile ? 64 : MAX_FRAMES,
-          Math.max(MIN_FRAMES, Math.round(video.duration * 24))
+        const bitmaps = await Promise.all(
+          indices.map(async (i) => {
+            const res = await fetch(frameUrl(i));
+            if (!res.ok) throw new Error(`frame ${i} failed`);
+            return createImageBitmap(await res.blob());
+          })
         );
-        const scale = Math.min(1, maxWidth / video.videoWidth);
-        const w = Math.round(video.videoWidth * scale);
-        const h = Math.round(video.videoHeight * scale);
-
-        // Route frames through a 2D canvas: createImageBitmap(video) is not
-        // supported on iOS Safari, but drawImage + createImageBitmap(canvas)
-        // works everywhere.
-        const grab = document.createElement('canvas');
-        grab.width = w;
-        grab.height = h;
-        const gctx = grab.getContext('2d');
-        if (!gctx) throw new Error('no 2d context');
-
-        for (let i = 0; i < frameCount; i++) {
-          if (cancelled) return;
-          const t = (i / (frameCount - 1)) * Math.max(0, video.duration - 0.05);
-          await new Promise<void>((resolve, reject) => {
-            const onSeeked = () => {
-              video.removeEventListener('seeked', onSeeked);
-              resolve();
-            };
-            video.addEventListener('seeked', onSeeked);
-            video.onerror = () => reject(new Error('seek failed'));
-            video.currentTime = t;
-          });
-          if (cancelled) return;
-          gctx.drawImage(video, 0, 0, w, h);
-          const bitmap = await createImageBitmap(grab);
-          extracted.push(bitmap);
+        if (cancelled) {
+          bitmaps.forEach((b) => b.close());
+          return;
         }
-        if (cancelled) return;
-
-        framesRef.current = extracted;
+        loaded.push(...bitmaps);
+        framesRef.current = loaded;
         setFramesReady(true);
       } catch {
-        // Extraction failed — do nothing, the video fallback stays visible.
+        // Loading failed — do nothing, the video fallback stays visible.
       }
     }
 
-    extract();
+    load();
 
     return () => {
       cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      extracted.forEach((b) => b.close());
+      loaded.forEach((b) => b.close());
     };
   }, []);
 
